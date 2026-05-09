@@ -1,0 +1,66 @@
+{
+  "entities": {
+    "Station": {
+      "title": "Radio Station",
+      "description": "A radio station available for streaming",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "frequency": { "type": "string" },
+        "coverUrl": { "type": "string" },
+        "streamUrl": { "type": "string" },
+        "fallbackStreamUrl": { "type": "string" },
+        "tags": { 
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "category": { "type": "string" },
+        "gain": { "type": "number" },
+        "isCustom": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "streamUrl"]
+    },
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Public information about a user",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "bio": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "joinDate": { "type": "string" },
+        "isPro": { "type": "boolean" },
+        "level": { "type": "number" },
+        "listeningMinutes": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "UserFavorite": {
+      "title": "User Favorite",
+      "description": "A station favorited by a user",
+      "type": "object",
+      "properties": {
+        "stationId": { "type": "string" },
+        "userId": { "type": "string" },
+        "favoritedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "stations": {
+      "schema": "Station",
+      "description": "Collection of all radio stations"
+    },
+    "users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Private user profile data"
+    },
+    "users/{userId}/favorites": {
+      "schema": "UserFavorite",
+      "description": "Subcollection of user's favorite stations"
+    }
+  }
+}
