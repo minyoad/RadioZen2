@@ -1,6 +1,45 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, List, Radio, Loader2, AlertCircle } from 'lucide-react';
 import { Station, PlaybackStatus } from '../types';
+
+const AudioVisualizer: React.FC<{ data?: Uint8Array, isPlaying: boolean }> = ({ data, isPlaying }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!data || data.length === 0 || !isPlaying) {
+      // Draw flat line
+      ctx.fillStyle = '#64748b'; // slate-500
+      ctx.fillRect(0, canvas.height / 2, canvas.width, 2);
+      return;
+    }
+
+    const barWidth = (canvas.width / data.length) * 2.5;
+    let x = 0;
+
+    for (let i = 0; i < data.length; i++) {
+      const barHeight = (data[i] / 255) * canvas.height;
+      
+      // Gradient
+      const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      gradient.addColorStop(0, '#8b5cf6'); // violet-500
+      gradient.addColorStop(1, '#6366f1'); // indigo-500
+      
+      ctx.fillStyle = gradient;
+      ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+
+      x += barWidth + 1;
+    }
+  }, [data, isPlaying]);
+
+  return <canvas ref={canvasRef} width={100} height={30} className="w-[100px] h-[30px]" />;
+};
 
 interface PlayerBarProps {
   currentStation: Station | null;
@@ -16,6 +55,8 @@ interface PlayerBarProps {
   togglePlaylist: () => void;
   showPlaylist: boolean;
   onOpenFullPlayer?: () => void;
+  songTitle?: string;
+  visualizerData?: Uint8Array;
 }
 
 export const PlayerBar: React.FC<PlayerBarProps> = ({
@@ -31,7 +72,9 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
   onPrev,
   togglePlaylist,
   showPlaylist,
-  onOpenFullPlayer
+  onOpenFullPlayer,
+  songTitle,
+  visualizerData
 }) => {
   if (!currentStation) {
     return (
@@ -85,13 +128,16 @@ export const PlayerBar: React.FC<PlayerBarProps> = ({
                  </div>
              )}
           </div>
-          <div className="overflow-hidden min-w-0">
+          <div className="overflow-hidden min-w-0 flex flex-col justify-center">
             <h4 className={`font-bold truncate text-sm md:text-base ${playbackStatus === 'error' ? 'text-red-500' : 'text-slate-900 dark:text-white'}`}>
                 {playbackStatus === 'error' ? '播放失败 (点击重试)' : currentStation.name}
             </h4>
-            <p className="text-xs md:text-sm text-slate-500 dark:text-slate-400 truncate">
-                {playbackStatus === 'buffering' ? '正在加载...' : currentStation.description}
-            </p>
+            <div className="flex items-center gap-2">
+              <p className="text-xs md:text-sm text-slate-500 dark:text-slate-400 truncate">
+                  {playbackStatus === 'buffering' ? '正在加载...' : (songTitle || currentStation.description)}
+              </p>
+              {isPlaying && <AudioVisualizer data={visualizerData} isPlaying={isPlaying} />}
+            </div>
           </div>
         </div>
 

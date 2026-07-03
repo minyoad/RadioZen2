@@ -143,6 +143,95 @@ async function startServer() {
     });
   });
 
+  // Streaming CORS proxy to bypass browser restrictions
+  app.get("/api/proxy", async (req, res) => {
+    const targetUrl = req.query.url as string;
+    if (!targetUrl) {
+      return res.status(400).send("Missing url parameter");
+    }
+
+    try {
+      const parsedUrl = new URL(targetUrl);
+      
+      const headers: Record<string, string> = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+      };
+
+      if (req.headers["icy-metadata"]) {
+        headers["Icy-MetaData"] = req.headers["icy-metadata"] as string;
+      }
+
+      // Bypasses referer checks on the streaming servers
+      headers["Referer"] = parsedUrl.origin + "/";
+
+      const response = await fetch(targetUrl, { headers });
+
+      if (!response.ok) {
+        console.warn(`[Proxy] Failed to fetch ${targetUrl}: ${response.status} ${response.statusText}`);
+        return res.status(response.status).send(`Failed to fetch target URL: ${response.statusText}`);
+      }
+
+      // Add CORS headers for the frontend player
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "*");
+      res.setHeader("Access-Control-Expose-Headers", "icy-metaint, icy-name, icy-genre, icy-url, icy-br, icy-sr, icy-vbr, icy-pub");
+
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType) {
+        res.setHeader("Content-Type", contentType);
+      }
+
+      const isPlaylist = targetUrl.includes(".m3u8") || 
+                         contentType.includes("mpegurl") || 
+                         contentType.includes("application/x-mpegurl") ||
+                         contentType.includes("vnd.apple.mpegurl");
+
+      if (isPlaylist) {
+        const text = await response.text();
+        const lines = text.split(/\r?\n/);
+        const rewrittenLines = lines.map(line => {
+          const trimmed = line.trim();
+          if (trimmed.length === 0 || trimmed.startsWith("#")) {
+            return line;
+          }
+          try {
+            const absoluteUrl = new URL(trimmed, targetUrl).toString();
+            return `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`;
+          } catch (e) {
+            return line;
+          }
+        });
+        return res.send(rewrittenLines.join("\n"));
+      } else {
+        if (response.body && typeof response.body.getReader === "function") {
+          const reader = response.body.getReader();
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              res.write(value);
+            }
+          } catch (streamError) {
+            console.error("[Proxy] Stream transmission error:", streamError);
+          } finally {
+            res.end();
+          }
+        } else if (response.body && typeof (response.body as any).pipe === "function") {
+          (response.body as any).pipe(res);
+        } else {
+          const buffer = await response.arrayBuffer();
+          res.send(Buffer.from(buffer));
+        }
+      }
+    } catch (error: any) {
+      console.error(`[Proxy] Error proxying ${targetUrl}:`, error);
+      res.status(500).send(`Proxy Error: ${error.message}`);
+    }
+  });
+
   // Background load (initial)
   updateStationsCache().catch(err => console.error("[Server] Initial cache load failed:", err));
 

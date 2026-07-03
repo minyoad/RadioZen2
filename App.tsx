@@ -1,5 +1,6 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import Hls from 'hls.js';
+import IcecastMetadataPlayer from 'icecast-metadata-player';
 import { Sidebar } from './components/Sidebar';
 import { StationCard } from './components/StationCard';
 import { PlayerBar } from './components/PlayerBar';
@@ -83,6 +84,15 @@ const App: React.FC = () => {
   const [toast, setToast] = useState<{ message: string; type: 'info' | 'error' | 'success' } | null>(null);
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Audio & Metadata State
+  const [songTitle, setSongTitle] = useState<string>('');
+  const [visualizerData, setVisualizerData] = useState<Uint8Array>(new Uint8Array());
+  const analyzerRef = useRef<AnalyserNode | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const requestRef = useRef<number>();
+  const icecastPlayerRef = useRef<any>(null);
 
   // Auth & Profile Sync
   useEffect(() => {
@@ -274,7 +284,8 @@ const App: React.FC = () => {
     }
   });
 
-  const [useFallback, setUseFallback] = useState(false);
+  const [fallbackIndex, setFallbackIndex] = useState(0);
+  const [useProxy, setUseProxy] = useState(false);
   const [autoHttpsUpgrade, setAutoHttpsUpgrade] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -403,24 +414,26 @@ const App: React.FC = () => {
     const onStalled = () => {
         if (isPlaying) setPlaybackStatus('buffering');
     };
-    const onError = () => setPlaybackStatus('error');
+    const onError = () => {
+      console.warn(`[Player] Native audio element error`);
+      if (isPlaying) {
+        handlePlaybackFailure("Native audio element playback failed");
+      } else {
+        setPlaybackStatus('error');
+      }
+    };
     const onCanPlay = () => {
         // Optional: could set to idle or ready, but 'playing' event is better
     };
-
-    if (audio) {
-        audio.addEventListener('waiting', onWaiting);
-        audio.addEventListener('playing', onPlaying);
-        audio.addEventListener('pause', onPause);
-        audio.addEventListener('stalled', onStalled);
-        audio.addEventListener('error', onError);
-        audio.addEventListener('canplay', onCanPlay);
-    }
 
     const stopPlayback = () => {
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
+      }
+      if (icecastPlayerRef.current) {
+        icecastPlayerRef.current.stop();
+        icecastPlayerRef.current = null;
       }
       if (audio) {
         audio.pause();
@@ -432,7 +445,17 @@ const App: React.FC = () => {
         audio.removeEventListener('canplay', onCanPlay);
       }
       clearFade();
+      setSongTitle('');
     };
+
+    if (audio) {
+        audio.addEventListener('waiting', onWaiting);
+        audio.addEventListener('playing', onPlaying);
+        audio.addEventListener('pause', onPause);
+        audio.addEventListener('stalled', onStalled);
+        audio.addEventListener('error', onError);
+        audio.addEventListener('canplay', onCanPlay);
+    }
 
     if (!isPlaying || !currentStation || !audio) {
       if (!isPlaying) setPlaybackStatus('idle');
@@ -440,6 +463,62 @@ const App: React.FC = () => {
       return;
     }
     
+    // Parse possible multiple URLs joined by '#'
+    const urls = [
+      ...currentStation.streamUrl.split('#').map(u => u.trim()).filter(Boolean),
+      ...(currentStation.fallbackStreamUrl ? [currentStation.fallbackStreamUrl] : [])
+    ].filter(Boolean);
+
+    if (urls.length === 0) {
+      setIsPlaying(false);
+      setPlaybackStatus('error');
+      showToast('该电台未提供有效的播放地址', 'error');
+      stopPlayback();
+      return;
+    }
+
+    const activeIndex = Math.min(fallbackIndex, urls.length - 1);
+    let src = urls[activeIndex];
+
+    if (autoHttpsUpgrade && src.startsWith('http:')) {
+      src = src.replace('http:', 'https:');
+    }
+
+    // Wrap with server proxy if useProxy is true
+    if (useProxy) {
+      src = `/api/proxy?url=${encodeURIComponent(src)}`;
+    }
+
+    const isM3u8 = src.includes('.m3u8') || src.includes('application/x-mpegurl') || src.includes('.isml') || src.includes('/api/proxy');
+
+    // Force cache bust to prevent iOS from playing stale buffer (mostly for MP3/AAC)
+    // Some M3U8 servers return 400 if they don't expect extra query params.
+    const separator = src.includes('?') ? '&' : '?';
+    const finalSrc = isM3u8 ? src : `${src}${separator}t=${Date.now()}`;
+
+    const handlePlaybackFailure = (reason: string) => {
+      console.error(`[Player] Playback failure: ${reason} for active index ${activeIndex} (useProxy=${useProxy})`);
+      
+      if (!useProxy) {
+        showToast('主线路连接失败，正在切换至代理通道...', 'info');
+        setUseProxy(true);
+        retryCount.current = 0;
+      } else if (fallbackIndex + 1 < urls.length) {
+        showToast('正在尝试备用线路...', 'info');
+        setFallbackIndex(prev => prev + 1);
+        setUseProxy(false);
+        setAutoHttpsUpgrade(false);
+        retryCount.current = 0;
+      } else {
+        console.error(`[Player] Fatal playback error. Possible dead stream links.`);
+        showToast('该电台连接失败 (可能是由于跨域限制或链接失效)', 'error');
+        stopPlayback();
+        setIsPlaying(false);
+        setPlaybackStatus('error');
+        setUnplayableStationIds(prev => new Set(prev).add(currentStation.id));
+      }
+    };
+
     // Start Loading
     setPlaybackStatus('buffering');
 
@@ -449,21 +528,6 @@ const App: React.FC = () => {
       showToast('该电台暂时无法播放', 'error');
       return;
     }
-
-    let src = useFallback && currentStation.fallbackStreamUrl 
-      ? currentStation.fallbackStreamUrl 
-      : currentStation.streamUrl;
-
-    if (autoHttpsUpgrade && src.startsWith('http:')) {
-      src = src.replace('http:', 'https:');
-    }
-
-    const isM3u8 = src.includes('.m3u8') || src.includes('application/x-mpegurl') || src.includes('.isml');
-
-    // Force cache bust to prevent iOS from playing stale buffer (mostly for MP3/AAC)
-    // Some M3U8 servers return 400 if they don't expect extra query params.
-    const separator = src.includes('?') ? '&' : '?';
-    const finalSrc = isM3u8 ? src : `${src}${separator}t=${Date.now()}`;
 
     // Reset retry count on new station/play
     retryCount.current = 0;
@@ -498,6 +562,21 @@ const App: React.FC = () => {
         }
       });
 
+      hls.on(Hls.Events.FRAG_PARSING_METADATA, (event, data) => {
+        if (data && data.samples) {
+          for (let sample of data.samples) {
+            // Very basic ID3 parsing for TIT2 (Title)
+            if (sample.data) {
+              const str = new TextDecoder().decode(sample.data);
+              const titleMatch = str.match(/TIT2.*?([A-Za-z0-9\s\-_]+)/);
+              if (titleMatch && titleMatch[1]) {
+                setSongTitle(titleMatch[1].trim());
+              }
+            }
+          }
+        }
+      });
+
       hls.on(Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
           switch (data.type) {
@@ -507,7 +586,7 @@ const App: React.FC = () => {
               
               const isMixedContent = window.location.protocol === 'https:' && finalSrc.startsWith('http:');
               
-              if (isMixedContent || (data.details === 'manifestLoadError' && !autoHttpsUpgrade && finalSrc.startsWith('http:'))) {
+              if (isMixedContent || (data.details === 'manifestLoadError' && !autoHttpsUpgrade && finalSrc.startsWith('http:') && !useProxy)) {
                 showToast('正在尝试切换安全连接 (HTTPS)...', 'info');
                 setAutoHttpsUpgrade(true);
                 return;
@@ -520,18 +599,7 @@ const App: React.FC = () => {
                    if (hlsRef.current) hlsRef.current.startLoad();
                 }, 1000 * retryCount.current);
               } else {
-                if (!useFallback && currentStation.fallbackStreamUrl) {
-                  showToast('连接失败，尝试备用线路...', 'info');
-                  setUseFallback(true);
-                  setAutoHttpsUpgrade(false);
-                } else {
-                  console.error(`[Player] Fatal network error: ${data.details}. Possible CORS or dead link.`);
-                  showToast('电台连接失败 (可能是 CORS 跨域或链接失效)', 'error');
-                  hls.destroy();
-                  setIsPlaying(false);
-                  setPlaybackStatus('error');
-                  setUnplayableStationIds(prev => new Set(prev).add(currentStation.id));
-                }
+                handlePlaybackFailure(`HLS Network error: ${data.details}`);
               }
               break;
             case Hls.ErrorTypes.MEDIA_ERROR:
@@ -548,22 +616,66 @@ const App: React.FC = () => {
         }
       });
     } else {
-      // Native Audio Playback (iOS Safari / MP3)
-      audio.src = finalSrc;
-      audio.load();
-      const playPromise = audio.play();
-      if (playPromise !== undefined) {
-         playPromise.then(() => startFadeIn()).catch(error => {
+      // Native Audio Playback via IcecastMetadataPlayer
+      icecastPlayerRef.current = new IcecastMetadataPlayer(finalSrc, {
+        audioElement: audio,
+        onMetadata: (metadata: any) => {
+          if (metadata && metadata.StreamTitle) {
+            setSongTitle(metadata.StreamTitle);
+          } else {
+            setSongTitle('');
+          }
+        },
+        onError: (error: Error) => {
+          console.error("[IcecastMetadataPlayer] error:", error);
+          handlePlaybackFailure(`Stream error: ${error.message}`);
+        }
+      });
+      
+      const playPromise = icecastPlayerRef.current.play();
+      if (playPromise) {
+         playPromise.then(() => startFadeIn()).catch((error: any) => {
             console.error("Playback failed:", error);
-            // Don't auto-stop here, let user retry or browser events handle 'error'
          });
       }
     }
 
+    // Initialize AudioContext Analyzer
+    if (!audioCtxRef.current) {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioContextClass) {
+        audioCtxRef.current = new AudioContextClass();
+        analyzerRef.current = audioCtxRef.current.createAnalyser();
+        analyzerRef.current.fftSize = 64; // Small for bar graph
+      }
+    }
+
+    if (audioCtxRef.current && analyzerRef.current && audio && !sourceNodeRef.current) {
+      try {
+        sourceNodeRef.current = audioCtxRef.current.createMediaElementSource(audio);
+        sourceNodeRef.current.connect(analyzerRef.current);
+        analyzerRef.current.connect(audioCtxRef.current.destination);
+      } catch (e) {
+        console.warn("Could not create media element source:", e);
+      }
+    }
+
+    // Animation Loop for Analyzer
+    const updateVisualizer = () => {
+      if (analyzerRef.current && isPlaying) {
+        const dataArray = new Uint8Array(analyzerRef.current.frequencyBinCount);
+        analyzerRef.current.getByteFrequencyData(dataArray);
+        setVisualizerData(new Uint8Array(dataArray));
+      }
+      requestRef.current = requestAnimationFrame(updateVisualizer);
+    };
+    requestRef.current = requestAnimationFrame(updateVisualizer);
+
     return () => {
+      if (requestRef.current) cancelAnimationFrame(requestRef.current);
       stopPlayback();
     };
-  }, [currentStation?.id, isPlaying, useFallback, autoHttpsUpgrade, unplayableStationIds, playerKey]);
+  }, [currentStation?.id, isPlaying, fallbackIndex, useProxy, autoHttpsUpgrade, unplayableStationIds, playerKey]);
 
   // Handlers
   const handleAddCustomStation = (newStation: Station) => {
@@ -623,7 +735,8 @@ const App: React.FC = () => {
       // SWITCH: Increment key to force new audio element
       setPlayerKey(k => k + 1);
       setPlayContext(context);
-      setUseFallback(false);
+      setFallbackIndex(0);
+      setUseProxy(false);
       setAutoHttpsUpgrade(false);
       setCurrentStation(station);
       setIsPlaying(true);
@@ -634,7 +747,8 @@ const App: React.FC = () => {
 
   const handleNext = () => {
     if (!currentStation) return;
-    setUseFallback(false);
+    setFallbackIndex(0);
+    setUseProxy(false);
     setAutoHttpsUpgrade(false);
     let listToUse = stations.filter(s => !unplayableStationIds.has(s.id));
     if (playContext === 'playlist' && playlist.length > 0) {
@@ -657,7 +771,8 @@ const App: React.FC = () => {
 
   const handlePrev = () => {
     if (!currentStation) return;
-    setUseFallback(false);
+    setFallbackIndex(0);
+    setUseProxy(false);
     setAutoHttpsUpgrade(false);
     let listToUse = stations.filter(s => !unplayableStationIds.has(s.id));
     if (playContext === 'playlist' && playlist.length > 0) {
@@ -1148,6 +1263,8 @@ const App: React.FC = () => {
             togglePlaylist={() => setShowPlaylist(!showPlaylist)} 
             showPlaylist={showPlaylist} 
             onOpenFullPlayer={() => setShowFullPlayer(true)} 
+            songTitle={songTitle}
+            visualizerData={visualizerData}
         />
         
         <BottomNav 
@@ -1156,7 +1273,7 @@ const App: React.FC = () => {
         currentUser={currentUser}
       />
 
-        {showFullPlayer && <MobileFullPlayer station={currentStation} isPlaying={isPlaying} playbackStatus={playbackStatus} onTogglePlay={() => handlePlayStation(currentStation!, playContext)} onClose={() => setShowFullPlayer(false)} onNext={handleNext} onPrev={handlePrev} volume={volume} onVolumeChange={setVolume} onTogglePlaylist={() => setShowPlaylist(!showPlaylist)} />}
+        {showFullPlayer && <MobileFullPlayer station={currentStation} isPlaying={isPlaying} playbackStatus={playbackStatus} onTogglePlay={() => handlePlayStation(currentStation!, playContext)} onClose={() => setShowFullPlayer(false)} onNext={handleNext} onPrev={handlePrev} volume={volume} onVolumeChange={setVolume} onTogglePlaylist={() => setShowPlaylist(!showPlaylist)} songTitle={songTitle} visualizerData={visualizerData} />}
       </div>
     </div>
   );

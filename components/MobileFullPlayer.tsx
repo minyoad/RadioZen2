@@ -1,6 +1,40 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { ChevronDown, Play, Pause, SkipBack, SkipForward, Volume2, ListMusic, Loader2, AlertCircle } from 'lucide-react';
 import { Station, PlaybackStatus } from '../types';
+
+const AudioVisualizer: React.FC<{ data?: Uint8Array, isPlaying: boolean }> = ({ data, isPlaying }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!data || data.length === 0 || !isPlaying) {
+      ctx.fillStyle = '#64748b';
+      ctx.fillRect(0, canvas.height / 2, canvas.width, 2);
+      return;
+    }
+
+    const barWidth = (canvas.width / data.length) * 2.5;
+    let x = 0;
+
+    for (let i = 0; i < data.length; i++) {
+      const barHeight = (data[i] / 255) * canvas.height;
+      const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      gradient.addColorStop(0, '#8b5cf6');
+      gradient.addColorStop(1, '#6366f1');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+      x += barWidth + 1;
+    }
+  }, [data, isPlaying]);
+
+  return <canvas ref={canvasRef} width={200} height={40} className="w-[200px] h-[40px] opacity-75" />;
+};
 
 interface MobileFullPlayerProps {
   station: Station | null;
@@ -13,6 +47,8 @@ interface MobileFullPlayerProps {
   volume: number;
   onVolumeChange: (val: number) => void;
   onTogglePlaylist: () => void;
+  songTitle?: string;
+  visualizerData?: Uint8Array;
 }
 
 export const MobileFullPlayer: React.FC<MobileFullPlayerProps> = ({
@@ -25,7 +61,9 @@ export const MobileFullPlayer: React.FC<MobileFullPlayerProps> = ({
   onPrev,
   volume,
   onVolumeChange,
-  onTogglePlaylist
+  onTogglePlaylist,
+  songTitle,
+  visualizerData
 }) => {
   if (!station) return null;
 
@@ -90,11 +128,16 @@ export const MobileFullPlayer: React.FC<MobileFullPlayerProps> = ({
 
         {/* Info */}
         <div className="mt-6 mb-6 flex-shrink-0">
-          <div className="flex items-center justify-between">
-            <div className="overflow-hidden mr-4">
+          <div className="flex flex-col">
+            <div className="overflow-hidden">
               <h2 className="text-2xl font-bold text-slate-800 dark:text-white truncate transition-colors leading-tight">{station.name}</h2>
-              <p className="text-slate-500 dark:text-slate-400 text-lg truncate mt-1.5 transition-colors font-medium">{station.description}</p>
+              <p className="text-slate-500 dark:text-slate-400 text-lg truncate mt-1.5 transition-colors font-medium">{songTitle || station.description}</p>
             </div>
+            {isPlaying && (
+              <div className="mt-4 flex justify-center w-full">
+                <AudioVisualizer data={visualizerData} isPlaying={isPlaying} />
+              </div>
+            )}
           </div>
           
           <div className="mt-5 flex gap-2 flex-wrap">
