@@ -7,8 +7,13 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, collection, getDocs, query, orderBy } from "firebase/firestore";
 import { DEFAULT_STATIONS } from "./constants.js"; // Note: might need .js or just constants
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const resolvedFilename = typeof import.meta !== "undefined" && import.meta.url
+  ? fileURLToPath(import.meta.url)
+  : (typeof __filename !== "undefined" ? __filename : "");
+
+const resolvedDirname = typeof import.meta !== "undefined" && import.meta.url
+  ? path.dirname(resolvedFilename)
+  : (typeof __dirname !== "undefined" ? __dirname : "");
 
 // Helper to load JSON safely
 const loadJson = (filePath: string) => {
@@ -23,7 +28,7 @@ const loadJson = (filePath: string) => {
   return null;
 };
 
-const firebaseConfig = loadJson(path.join(__dirname, "firebase-applet-config.json"));
+const firebaseConfig = loadJson(path.join(process.cwd(), "firebase-applet-config.json"));
 
 // Initialize Firebase Web SDK for Server
 const firebaseApp = firebaseConfig ? initializeApp(firebaseConfig) : null;
